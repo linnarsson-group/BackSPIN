@@ -24,11 +24,11 @@
 # OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-# This .py file can be used as a library or a command-line version of BackSPIN, 
+# This .py file can be used as a library or a command-line version of BackSPIN,
 # This version of BackSPIN was implemented by Gioele La Manno.
 # The BackSPIN biclustering algorithm was developed by Amit Zeisel and is described
-# in Zeisel et al. Cell types in the mouse cortex and hippocampus revealed by 
-# single-cell RNA-seq Science 2015 (PMID: 25700174, doi: 10.1126/science.aaa1934). 
+# in Zeisel et al. Cell types in the mouse cortex and hippocampus revealed by
+# single-cell RNA-seq Science 2015 (PMID: 25700174, doi: 10.1126/science.aaa1934).
 #
 # Building using pyinstaller:
 # pyinstaller -F backSPIN.py -n backspin-mac-64-bit
@@ -40,6 +40,19 @@ import getopt
 import sys
 import os
 from Cef_tools import CEF_obj
+
+# Some helper functions to see if we make unnecessary copies
+# Will be removed after optimisation pass
+def get_data_base(arr):
+    """For a given Numpy array, finds the
+    base array that "owns" the actual data."""
+    base = arr
+    while isinstance(base.base, np.ndarray):
+        base = base.base
+    return base
+
+def arrays_share_data(x, y):
+    return get_data_base(x) is get_data_base(y)
 
 class Results:
         pass
@@ -59,7 +72,7 @@ def calc_loccenter(x, lin_log_flag):
                 w = x[i,ind]/sum(x[i,ind], 0)
             else:
                 w = (2**x[i,ind])/sum(2**x[i,ind], 0)
-            loc_center[i] = sum(w*ind, 0)       
+            loc_center[i] = sum(w*ind, 0)
         else:
             loc_center[i] = 0
 
@@ -80,21 +93,21 @@ def _calc_weights_matrix(mat_size, wid):
 
     '''
     #calculate square distance from the diagonal
-    sqd = (arange(1,mat_size+1)[newaxis,:] - arange(1,mat_size+1)[:,newaxis])**2
-    #make the distance relative to the mat_size
-    norm_sqd = sqd/wid
-    #evaluate a normal pdf
-    weights_mat = exp(-norm_sqd/mat_size)
+    sqd = arange(1,mat_size+1)[newaxis,:] - arange(1,mat_size+1)[:,newaxis]
+    sqd **= 2
+    ##make the distance relative to the mat_size
+    divisor = 1.0 /  (-wid * mat_size)
+    weights_mat = sqd * divisor
+    weights_mat = exp(weights_mat, weights_mat)
     #avoid useless precision that would slow down the matrix multiplication
     weights_mat -= 1e-6
     weights_mat[weights_mat<0] = 0
     #normalize row and column sum
-    weights_mat /= sum(weights_mat,0)[newaxis,:]
-    weights_mat /= sum(weights_mat,1)[:, newaxis]
-    #fix asimmetries
-    weights_mat = (weights_mat + weights_mat.T) / 2.
+    weights_mat /= sum(weights_mat,0)[newaxis,:] * sum(weights_mat,1)[:, newaxis]
+    #fix asymmetries
+    weights_mat += weights_mat.T
+    weights_mat *= 0.5
     return weights_mat
-
 
 def _sort_neighbourhood( dist_matrix, wid ):
     '''Perform a single iteration of SPIN
@@ -125,7 +138,6 @@ def _sort_neighbourhood( dist_matrix, wid ):
     sorted_ind = sort_score.argsort(0)[::-1]
     return sorted_ind
 
-
 def sort_mat_by_neighborhood(dist_matrix, wid, times):
     '''Perform several iterations of SPIN using a fixed wid parameter
     Parameters
@@ -148,7 +160,7 @@ def sort_mat_by_neighborhood(dist_matrix, wid, times):
     indexes = arange(dist_matrix.shape[0])
     for i in range(times):
         #sort the sitance matrix according the previous iteration
-        tmpmat = dist_matrix[indexes,:] 
+        tmpmat = dist_matrix[indexes,:]
         tmpmat = tmpmat[:,indexes]
         sorted_ind = _sort_neighbourhood(tmpmat, wid);
         #resort the original indexes
@@ -189,7 +201,7 @@ def SPIN(dt, widlist=[10,1], iters=30, axis='both', verbose=False):
     dt: 2-D array
         the data matrix
     widlist: float or list of int
-        If float is passed, it is used as step parameted of _generate_widlist, 
+        If float is passed, it is used as step parameted of _generate_widlist,
         and widlist is generated to run SPIN.
         If list is passed it is used directly to run SPIN.
     iters: int
@@ -215,14 +227,14 @@ def SPIN(dt, widlist=[10,1], iters=30, axis='both', verbose=False):
     assert axis in ['both', 0,1], 'axis must be 0, 1 or \'both\' '
     #Sort both axis
     if axis == 'both':
-        CCc = 1 - corrcoef(dt.T) 
-        CCr = 1 - corrcoef(dt) 
+        CCc = 1 - corrcoef(dt.T)
+        CCr = 1 - corrcoef(dt)
         if type(widlist) != list:
             widlist_r = _generate_widlist(dt, axis=0, step=widlist)
             widlist_c = _generate_widlist(dt, axis=1, step=widlist)
         if verbose:
                 print '\nSorting genes.'
-                print 'Neighbourood=',
+                print 'Neighbourhood=',
         for wid in widlist_r:
             if verbose:
                 print ('%i, ' % wid),
@@ -232,7 +244,7 @@ def SPIN(dt, widlist=[10,1], iters=30, axis='both', verbose=False):
             IXr = IXr[INDr]
         if verbose:
                 print '\nSorting cells.'
-                print 'Neighbourood=',
+                print 'Neighbourhood=',
         for wid in widlist_c:
             if verbose:
                 print ('%i, ' % wid),
@@ -303,7 +315,7 @@ def backSPIN(data, numLevels=2, first_run_iters=10, first_run_step=0.05, runs_it
     stop_const: float
         minimum score that a breaking point has to reach to be suitable for splitting
     low_thrs: float
-        genes with average lower than this threshold are assigned to either of the 
+        genes with average lower than this threshold are assigned to either of the
         splitting group reling on genes that are higly correlated with them
 
     Returns
@@ -311,9 +323,9 @@ def backSPIN(data, numLevels=2, first_run_iters=10, first_run_step=0.05, runs_it
     results: Result object
         The results object contain the following attributes
         genes_order: 1-D array
-            indexes (a permutation) sorting the genes 
+            indexes (a permutation) sorting the genes
         cells_order: 1-D array
-            indexes (a permutation) sorting the cells 
+            indexes (a permutation) sorting the cells
         genes_gr_level: 2-D array
             for each depth level contains the cluster indexes for each gene
         cells_gr_level:
@@ -328,12 +340,12 @@ def backSPIN(data, numLevels=2, first_run_iters=10, first_run_step=0.05, runs_it
     Notes
     -----
     Typical usage
-    
+
     '''
     assert numLevels>0, '0 is not an available depth for backSPIN, use SPIN instead'
     #initialize some varaibles
-    genes_bor_level = [[] for i in range(numLevels)] 
-    cells_bor_level = [[] for i in range(numLevels)] 
+    genes_bor_level = [[] for i in range(numLevels)]
+    cells_bor_level = [[] for i in range(numLevels)]
     N,M = data.shape
     genes_order = arange(N)
     cells_order = arange(M)
@@ -348,16 +360,16 @@ def backSPIN(data, numLevels=2, first_run_iters=10, first_run_step=0.05, runs_it
     cells_order = cells_order[ix1]
 
     #For every level of depth DO:
-    for i in range(numLevels): 
+    for i in range(numLevels):
         k=0 # initialize group id counter
         # For every group generated at the parent level DO:
-        for j in range( len( set(cells_gr_level[:,i]) ) ): 
+        for j in range( len( set(cells_gr_level[:,i]) ) ):
             # Extract the a data matrix of the genes at that level
             g_settmp = nonzero(genes_gr_level[:,i]==j)[0] #indexes of genes in the level j
             c_settmp = nonzero(cells_gr_level[:,i]==j)[0] #indexes of cells in the level j
             datatmp = data[ ix_(genes_order[g_settmp], cells_order[c_settmp]) ]
             # If we are not below the splitting limit for both genes and cells DO:
-            if (len(g_settmp)>split_limit_g) & (len(c_settmp)>split_limit_c): 
+            if (len(g_settmp)>split_limit_g) & (len(c_settmp)>split_limit_c):
                 # Split and SPINsort the two halves
                 if i == numLevels-1:
                     divided = _divide_to_2and_resort(datatmp, wid=runs_step, iters_spin=runs_iters,\
@@ -401,7 +413,7 @@ def backSPIN(data, numLevels=2, first_run_iters=10, first_run_step=0.05, runs_it
                 cells_gr_level_sc[c_settmp,i+1] = cells_gr_level_sc[c_settmp,i]
                 # Augment of 1 becouse no new group was generated
                 k = k+1
-        
+
         # Find boundaries
         genes_bor_level[i] = r_[0, nonzero(diff(genes_gr_level[:,i+1])>0)[0]+1, data.shape[0] ]
         cells_bor_level[i] = r_[0, nonzero(diff(cells_gr_level[:,i+1])>0)[0]+1, data.shape[1] ]
@@ -418,8 +430,8 @@ def backSPIN(data, numLevels=2, first_run_iters=10, first_run_step=0.05, runs_it
     results.cells_bor_level = cells_bor_level
 
     return results
-    
-    
+
+
 
 def _divide_to_2and_resort(sorted_data, wid, iters_spin=8, stop_const = 1.15, low_thrs=0.2 , sort_genes=True, verbose=False):
     '''Core function of backSPIN: split the datamatrix in two and resort the two halves
@@ -433,7 +445,7 @@ def _divide_to_2and_resort(sorted_data, wid, iters_spin=8, stop_const = 1.15, lo
     stop_const: float
         minimum score that a breaking point has to reach to be suitable for splitting
     low_thrs: float
-        if the difference between the average expression of two groups is lower than threshold the algorythm 
+        if the difference between the average expression of two groups is lower than threshold the algorythm
         uses higly correlated gens to assign the gene to one of the two groups
     verbose: bool
         information about the split is printed
@@ -441,7 +453,7 @@ def _divide_to_2and_resort(sorted_data, wid, iters_spin=8, stop_const = 1.15, lo
     Returns
     -------
     '''
-    
+
     # Calculate correlation matrix for cells and genes
     Rcells = corrcoef(sorted_data.T)
     Rgenes = corrcoef(sorted_data)
@@ -457,7 +469,7 @@ def _divide_to_2and_resort(sorted_data, wid, iters_spin=8, stop_const = 1.15, lo
             tmp1 += sum(Rcells[i-1,:i]) + sum(Rcells[:i-1,i-1]);
             tmp2 -= sum(Rcells[i-1:,i-1]) + sum(Rcells[i-1,i:]);
             score[i] = (tmp1+tmp2) / float(i**2 + (N-i)**2)
-    
+
     breakp1 = argmax(score)
     score1 = Rcells[:breakp1,:breakp1]
     score1 = triu(score1)
@@ -474,10 +486,12 @@ def _divide_to_2and_resort(sorted_data, wid, iters_spin=8, stop_const = 1.15, lo
         gr1 = arange(N)[:breakp1]
         gr2 = arange(N)[breakp1:]
         # and assign the genes into the two groups
-        mean_gr1 = sorted_data[:,gr1].mean(1)
-        mean_gr2 = sorted_data[:,gr2].mean(1)
-        concat_loccenter_gr1 = c_[ calc_loccenter(sorted_data[:,gr1], 2), calc_loccenter(sorted_data[:,gr1][...,::-1], 2) ]
-        concat_loccenter_gr2 = c_[ calc_loccenter(sorted_data[:,gr2], 2), calc_loccenter(sorted_data[:,gr2][...,::-1], 2) ]
+        sorted_gr1 = sorted_data[:,gr1]
+        sorted_gr2 = sorted_data[:,gr2]
+        mean_gr1 = sorted_gr1.mean(1)
+        mean_gr2 = sorted_gr2.mean(1)
+        concat_loccenter_gr1 = c_[ calc_loccenter(sorted_gr1, 2), calc_loccenter(sorted_gr1[...,::-1], 2) ]
+        concat_loccenter_gr2 = c_[ calc_loccenter(sorted_gr2, 2), calc_loccenter(sorted_gr2[...,::-1], 2) ]
         center_gr1, flip_flag1 = concat_loccenter_gr1.min(1), concat_loccenter_gr1.argmin(1)
         center_gr2, flip_flag2 = concat_loccenter_gr2.max(1), concat_loccenter_gr2.argmax(1)
         sorted_data_tmp = array( sorted_data )
@@ -499,7 +513,7 @@ def _divide_to_2and_resort(sorted_data, wid, iters_spin=8, stop_const = 1.15, lo
             IN = argmax(mean_gr2)
             genesgr2 = array([IN])
             genesgr1 = setdiff1d(genesgr1, IN)
-        
+
         if verbose:
             print '\nSplitting (%i, %i) ' %  sorted_data.shape
             print 'in (%i,%i) ' % (genesgr1.shape[0],gr1.shape[0])
@@ -541,7 +555,7 @@ def _divide_to_2and_resort(sorted_data, wid, iters_spin=8, stop_const = 1.15, lo
         elif len(gr2) == 1:
             cellorder2 = 0
             genesorder2 = argsort(datagr2[:,0])
-        
+
         # contcatenate cells and genes indexes
         genes_resort1 = r_[genesgr1[genesorder1], genesgr2[genesorder2] ]
         cells_resort1 = r_[gr1[cellorder1], gr2[cellorder2] ]
@@ -567,7 +581,7 @@ def fit_CV(mu, cv, fit_method='Exp', svr_gamma=0.06, x0=[0.5,0.5], verbose=False
     cv: 1-D array
         coefficient of variation for each gene
     fit_method: string
-        allowed: 'SVR', 'Exp', 'binSVR', 'binExp' 
+        allowed: 'SVR', 'Exp', 'binSVR', 'binExp'
         default: 'SVR'(requires scikit learn)
         SVR: uses Support vector regression to fit the noise model
         Exp: Parametric fit to cv = mu^(-a) + b
@@ -580,13 +594,13 @@ def fit_CV(mu, cv, fit_method='Exp', svr_gamma=0.06, x0=[0.5,0.5], verbose=False
     mu_linspace: 1-D array
         x coordiantes to plot (min(log2(mu)) -> max(log2(mu)))
     cv_fit: 1-D array
-        y=f(x) coordinates to plot 
+        y=f(x) coordinates to plot
     pars: tuple or None
-    
+
     '''
     log2_m = log2(mu)
     log2_cv = log2(cv)
-    
+
     if len(mu)>1000 and 'bin' in fit_method:
         #histogram with 30 bins
         n,xi = histogram(log2_m,30)
@@ -610,7 +624,7 @@ def fit_CV(mu, cv, fit_method='Exp', svr_gamma=0.06, x0=[0.5,0.5], verbose=False
         if 'bin' in fit_method:
             print 'More than 1000 input feature needed for bin correction.'
         pass
-                
+
     if 'SVR' in fit_method:
         try:
             from sklearn.svm import SVR
@@ -626,7 +640,7 @@ def fit_CV(mu, cv, fit_method='Exp', svr_gamma=0.06, x0=[0.5,0.5], verbose=False
             mu_linspace = linspace(min(log2_m),max(log2_m))
             cv_fit = fitted_fun(mu_linspace[:,newaxis])
             return score, mu_linspace, cv_fit , params
-            
+
         except ImportError:
             if verbose:
                 print 'SVR fit requires scikit-learn python library. Using exponential instead.'
@@ -649,11 +663,11 @@ def fit_CV(mu, cv, fit_method='Exp', svr_gamma=0.06, x0=[0.5,0.5], verbose=False
         mu_linspace = linspace(min(log2_m),max(log2_m))
         cv_fit = fitted_fun(mu_linspace)
         return score, mu_linspace, cv_fit , params
-    
-    
+
+
 
 def feature_selection(data,thrs, verbose=False):
-    if thrs>= data.shape[0]:
+    if thrs >= data.shape[0]:
         if verbose:
             print "Trying to select %i features but only %i genes available." %( thrs, data.shape[0])
             print "Skipping feature selection"
@@ -662,9 +676,9 @@ def feature_selection(data,thrs, verbose=False):
     threeperK = int(ceil(3*data.shape[1]/1000.))
     zerotwoperK = int(floor(0.3*data.shape[1]/1000.))
     # is at least 1 molecule in 0.3% of thecells, is at least 2 molecules in 0.03% of the cells
-    condition = (sum(data>=1, 1)>= threeperK) & (sum(data>=2, 1)>=zerotwoperK) 
+    condition = (sum(data>=1, 1)>= threeperK) & (sum(data>=2, 1)>=zerotwoperK)
     ix_genes = ix_genes[condition]
-    
+
     mu = data[ix_genes,:].mean(1)
     sigma = data[ix_genes,:].std(1, ddof=1)
     cv = sigma/mu
@@ -674,7 +688,7 @@ def feature_selection(data,thrs, verbose=False):
     except ImportError:
         print "WARNING: Feature selection was skipped becouse scipy is required. Install scipy to run feature selection."
         return arange(data.shape[0])
- 
+
     return ix_genes[argsort(score)[::-1]][:thrs]
 
 def usage_quick():
@@ -708,12 +722,12 @@ def usage():
        -t [int]
               Number of the iterations used in the preparatory SPIN.
               Defaults to 10
-       -f [int]   
+       -f [int]
               Feature selection is performed before BackSPIN. Argument controls how many genes are seleceted.
               Selection is based on expected noise (a curve fit to the CV-vs-mean plot).
        -s [float]
               Controls the decrease rate of the width parameter used in the preparatory SPIN.
-              Smaller values will increase the number of SPIN iterations and result in higher 
+              Smaller values will increase the number of SPIN iterations and result in higher
               precision in the first step but longer execution time.
               Defaults to 0.1
        -T [int]
@@ -722,7 +736,7 @@ def usage():
               Defaults to 8
        -S [float]
               Controls the decrease rate of the width parameter.
-              Smaller values will increase the number of SPIN iterations and result in higher 
+              Smaller values will increase the number of SPIN iterations and result in higher
               precision but longer execution time.
               Does not apply on the first run (use -s instead)
               Defaults to 0.3
@@ -736,7 +750,7 @@ def usage():
               Minimum score that a breaking point has to reach to be suitable for splitting.
               Defaults to 1.15
        -r [float]
-              If the difference between the average expression of two groups is lower than threshold the algorythm 
+              If the difference between the average expression of two groups is lower than threshold the algorythm
               uses higly correlated genes to assign the gene to one of the two groups
               Defaults to 0.2
        -b [axisvalue]
@@ -744,7 +758,7 @@ def usage():
               Normal spin accepts the parameters -T -S
               An axis value 0 to only sort genes (rows), 1 to only sort cells (columns) or 'both' for both
               must be passed
-       -v  
+       -v
               Verbose. Print  to the stdoutput extra details of what is happening
 
     '''
@@ -754,7 +768,7 @@ def usage():
 
 
 if __name__ == '__main__':
-    print 
+    print
     #defaults arguments
     input_path = None
     outfiles_path = None
@@ -845,7 +859,7 @@ if __name__ == '__main__':
             input_cef.matrix = data.tolist()
             input_cef.row_attr_values = atleast_2d( array( input_cef.row_attr_values ))[:,ix_features].tolist()
             input_cef.update()
-        
+
         data = log2(data+1)
         data = data - data.mean(1)[:,newaxis]
         if data.shape[0] <= 3 and data.shape[1] <= 3:
@@ -925,8 +939,13 @@ if __name__ == '__main__':
             for c_name, c_val in zip( input_cef.col_attr_names, input_cef.col_attr_values):
                 output_cef.add_col_attr(c_name, array(c_val)[results])
             output_cef.set_matrix(array(input_cef.matrix)[:,results])
+<<<<<<< HEAD
 
-        
+
+=======
+
+
+>>>>>>> master
 
         output_cef.writeCEF( outfiles_path )
 
