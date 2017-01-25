@@ -36,6 +36,7 @@
 
 from __future__ import division
 from numpy import *
+from scipy.sparse import csr_matrix
 import getopt
 import sys
 import os
@@ -114,8 +115,16 @@ def _sort_neighbourhood( dist_matrix, wid ):
     mat_size = dist_matrix.shape[0]
     #assert mat_size>2, 'Matrix is too small to be sorted'
     weights_mat = _calc_weights_matrix(mat_size, wid)
-    #Calculate the dot product (can be very slow for big mat_size)
-    mismatch_score = dot(dist_matrix, weights_mat)
+    mismatch_score = None
+    # Calculate the dot product using scipy's sparse method (speeds up the dot calculation)
+    # Convert to sparse matrices
+    weights_mat = csr_matrix(weights_mat)
+    dist_matrix = csr_matrix(dist_matrix)
+    # Calculate dot
+    mismatch_score = dist_matrix.dot(weights_mat)
+    # Convert to dense matrix
+    mismatch_score = mismatch_score.toarray()
+
     energy, target_permutation = mismatch_score.min(1), mismatch_score.argmin(1)
     max_energy = max(energy)
     #Avoid points that have the same target_permutation value
@@ -744,6 +753,7 @@ def usage():
               Normal spin accepts the parameters -T -S
               An axis value 0 to only sort genes (rows), 1 to only sort cells (columns) or 'both' for both
               must be passed
+              
        -v  
               Verbose. Print  to the stdoutput extra details of what is happening
 
